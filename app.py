@@ -5,6 +5,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import datetime
 import numpy as np
+import io
 
 # --- 1. CONFIGURATION & SETUP ---
 st.set_page_config(page_title="Real Exchange Rate Analyzer", page_icon="💱", layout="wide")
@@ -22,49 +23,50 @@ COUNTRIES = {
 
 # --- 2. DATA FETCHING FUNCTION ---
 @st.cache_data(ttl=3600, show_spinner=False)
-def fetch_imf_data(iso3, key_template, is_fx=False):
-    """Fetches IMF data using the provided API hint. Raises exceptions on failure."""
+def fetch_imf_data(iso3, is_fx=False):
+    """Fetches IMF data using the updated SDMX 3.0 dataflows. Raises exceptions on failure."""
     if iso3 == "USA" and is_fx:
         # USA USD per USD exchange rate is implicitly 1.0
         dates = pd.date_range('1976-01-01', datetime.date.today(), freq='MS')
         return pd.Series(1.0, index=dates, name='value')
 
-    key = key_template.format(ISO3=iso3)
-    url = f"https://api.imf.org/external/sdmx/3.0/data/IFS/{key}?startPeriod=1976-01"
+    # IMF split legacy IFS into distinct dataflows (CPI and ER) in SDMX 3.0
+    if is_fx:
+        key = f"{iso3}.XDC_USD.PA_RT.M"
+        dataflow = "ER" 
+    else:
+        key = f"{iso3}.CPI._T.IX.M"
+        dataflow = "CPI"
+        
+    # Constructing the exact SDMX 3.0 path: /data/dataflow/{agency}/{dataflow}/{version}/{key}
+    url = f"https://api.imf.org/external/sdmx/3.0/data/dataflow/IMF.STA/{dataflow}/~/{key}?startPeriod=1976-01"
     
-    headers = {'Accept': 'application/vnd.sdmx.data+json'}
+    # Requesting CSV is drastically more reliable than parsing SDMX-JSON structures
+    headers = {'Accept': 'text/csv'}
     response = requests.get(url, headers=headers, timeout=15)
     
     if response.status_code != 200:
-        raise ConnectionError(f"IMF API returned status code {response.status_code} for {COUNTRIES[iso3]} ({iso3}).")
+        raise ConnectionError(f"IMF API returned status code {response.status_code} for {COUNTRIES[iso3]} ({dataflow}).")
         
-    data = response.json()
+    # Parse the CSV straight into a Pandas DataFrame
+    df_raw = pd.read_csv(io.StringIO(response.text))
     
-    # Recursive generator to flexibly find typical SDMX JSON time-series observations
-    def extract_obs(node):
-        if isinstance(node, dict):
-            if '@TIME_PERIOD' in node and '@OBS_VALUE' in node:
-                yield node['@TIME_PERIOD'], node['@OBS_VALUE']
-            elif 'TIME_PERIOD' in node and 'OBS_VALUE' in node:
-                yield node['TIME_PERIOD'], node['OBS_VALUE']
-            for v in node.values():
-                yield from extract_obs(v)
-        elif isinstance(node, list):
-            for item in node:
-                yield from extract_obs(item)
-    
-    extracted = list(extract_obs(data))
-    if not extracted:
-        raise ValueError(f"No valid time-series data found in the IMF payload for {COUNTRIES[iso3]} ({iso3}).")
+    if 'TIME_PERIOD' not in df_raw.columns or 'OBS_VALUE' not in df_raw.columns:
+        raise ValueError(f"Unexpected CSV format from IMF API for {COUNTRIES[iso3]} ({dataflow}).")
         
-    dates = [x[0] for x in extracted]
-    values = [float(x[1]) for x in extracted]
+    df_raw = df_raw[['TIME_PERIOD', 'OBS_VALUE']].rename(columns={'OBS_VALUE': 'value'})
     
-    df = pd.DataFrame({'date': dates, 'value': values})
-    # Parse to monthly start 'MS'
-    df['date'] = pd.to_datetime(df['date'] + '-01', format='%Y-%m-%d', errors='coerce')
-    df = df.dropna().sort_values('date').set_index('date')
-    return df['value']
+    # Standardize time periods: Handle SDMX formats (e.g., "1976-01", "1976-M01", "1976M01")
+    clean_dates = df_raw['TIME_PERIOD'].astype(str).str.replace(r'-?M', '-', regex=True)
+    df_raw['date'] = pd.to_datetime(clean_dates, errors='coerce')
+    
+    # Clean up empty values and set the date index
+    df_raw = df_raw.dropna(subset=['date', 'value']).sort_values('date').set_index('date')
+    
+    if df_raw.empty:
+        raise ValueError(f"No valid time-series data found in the IMF payload for {COUNTRIES[iso3]} ({dataflow}).")
+        
+    return df_raw['value']
 
 # --- 3. MAIN UI LAYOUT ---
 st.title("🌍 Real Exchange Rate (RER) Analyzer")
@@ -94,17 +96,14 @@ with st.sidebar:
 
 # --- 4. DATA PROCESSING ---
 with st.spinner("Fetching IMF API data..."):
-    cpi_key_tpl = "{ISO3}.CPI._T.IX.M"
-    fx_key_tpl = "{ISO3}.XDC_USD.PA_RT.M"
-
     try:
-        p1_series = fetch_imf_data(c1, cpi_key_tpl, is_fx=False)
-        p2_series = fetch_imf_data(c2, cpi_key_tpl, is_fx=False)
-        exc1_series = fetch_imf_data(c1, fx_key_tpl, is_fx=True)
-        exc2_series = fetch_imf_data(c2, fx_key_tpl, is_fx=True)
+        p1_series = fetch_imf_data(c1, is_fx=False)
+        p2_series = fetch_imf_data(c2, is_fx=False)
+        exc1_series = fetch_imf_data(c1, is_fx=True)
+        exc2_series = fetch_imf_data(c2, is_fx=True)
     except Exception as e:
         st.error(f"🚨 **Data Fetch Error:** {str(e)}")
-        st.info("The IMF API may be temporarily down, or data for the selected countries might be missing/unavailable. Please try different countries or try again later.")
+        st.info("The requested data might not be available for this specific country, or the API is under heavy load.")
         st.stop()
 
     # Master DataFrame
@@ -114,9 +113,9 @@ with st.spinner("Fetching IMF API data..."):
     df = df.join(exc1_series.rename('EXC1'))
     df = df.join(exc2_series.rename('EXC2'))
 
-    # Forward fill missing data, then backward fill to fix initial gaps
-    df.ffill(inplace=True)
-    df.bfill(inplace=True)
+    # Forward fill missing data up to a reasonable limit (e.g., 3 months for reporting lags)
+    # Note: We intentionally avoid backward filling so historical non-existent data (like the Euro before 1999) remains blank and doesn't skew RER*
+    df.ffill(limit=3, inplace=True)
 
     # S(t): units of Country 2 currency per 1 unit of Country 1 currency
     # Since EXC is Local / USD: 1 C1 = EXC2 / EXC1 units of C2.
@@ -139,8 +138,8 @@ with st.spinner("Fetching IMF API data..."):
         df_sample['Real_Index'] = np.nan
 
 # --- 5. PLOTTING ---
-if df_sample.empty:
-    st.warning("No data available for the selected date range.")
+if df_sample['Real_Index'].dropna().empty and df_sample['S'].dropna().empty:
+    st.warning("No overlapping economic data available for the selected date range and countries.")
 else:
     fig = make_subplots(specs=[[{"secondary_y": True}]])
     
@@ -171,9 +170,9 @@ else:
     st.plotly_chart(fig, use_container_width=True)
 
 # --- 6. DATA EXPORT ---
-st.markdown("### ") # Spacing
+st.markdown("### ") 
 with st.expander("📊 View Data & Download"):
-    st.dataframe(df_sample[['P1', 'P2', 'EXC1', 'EXC2', 'S', 'RER', 'Real_Index']].style.format("{:.4f}"), use_container_width=True)
+    st.dataframe(df_sample[['P1', 'P2', 'EXC1', 'EXC2', 'S', 'RER', 'Real_Index']].style.format("{:.4f}", na_rep="-"), use_container_width=True)
     
     csv_data = df_sample.to_csv(index_label="Date").encode('utf-8')
     st.download_button(
