@@ -186,8 +186,15 @@ def _fetch(dataflow: str, key: str) -> pd.Series:
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
-def get_cpi(iso3: str) -> pd.Series:
-    return _fetch("CPI", f"{iso3}.CPI._T.IX.M")
+def get_cpi(iso3: str) -> tuple[pd.Series, str]:
+    """Monthly CPI index. Returns (series, note)."""
+    s = _fetch("CPI", f"{iso3}.CPI._T.IX.M")
+    if s.empty and iso3 == EURO_AREA:
+        # The IMF publishes Euro-area prices as HICP rather than CPI.
+        s = _fetch("CPI", f"{iso3}.HICP._T.IX.M")
+        if not s.empty:
+            return s, "Euro-area prices use the harmonized CPI (HICP), the IMF's euro-area price index."
+    return s, ""
 
 
 @st.cache_data(ttl=6 * 3600, show_spinner=False)
@@ -218,9 +225,11 @@ def load_pair(c1: str, c2: str) -> dict:
         futures = {k: ex.submit(fn) for k, fn in jobs.items()}
         out = {k: f.result() for k, f in futures.items()}
     return {
-        "p1": out["p1"], "p2": out["p2"],
+        "p1": out["p1"][0], "p2": out["p2"][0],
         "e1": out["e1"][0], "e2": out["e2"][0],
-        "notes": [n for n in (out["e1"][1], out["e2"][1]) if n],
+        "notes": list(dict.fromkeys(
+            n for n in (out["p1"][1], out["p2"][1], out["e1"][1], out["e2"][1]) if n
+        )),
     }
 
 
