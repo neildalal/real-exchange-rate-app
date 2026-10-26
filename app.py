@@ -24,33 +24,35 @@ COUNTRIES = {
 # --- 2. DATA FETCHING FUNCTION ---
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_imf_data(iso3, is_fx=False):
-    """Fetches IMF data using the IFS dataflow. Raises exceptions on failure."""
+    """Fetches IMF data using the updated SDMX 3.0 dataflows. Raises exceptions on failure."""
     if iso3 == "USA" and is_fx:
         # USA USD per USD exchange rate is implicitly 1.0
         dates = pd.date_range('1976-01-01', datetime.date.today(), freq='MS')
         return pd.Series(1.0, index=dates, name='value')
 
-    # Constructing the exact key based on the provided hints
+    # IMF split legacy IFS into distinct dataflows (CPI and ER) in SDMX 3.0
     if is_fx:
         key = f"{iso3}.XDC_USD.PA_RT.M"
+        dataflow = "ER" 
     else:
         key = f"{iso3}.CPI._T.IX.M"
+        dataflow = "CPI"
         
-    # Reverted to the IFS dataflow, which contains the G163 aggregate data
-    url = f"https://api.imf.org/external/sdmx/3.0/data/IFS/{key}?startPeriod=1976-01"
+    # Constructing the exact SDMX 3.0 path: /data/dataflow/{agency}/{dataflow}/{version}/{key}
+    url = f"https://api.imf.org/external/sdmx/3.0/data/dataflow/IMF.STA/{dataflow}/~/{key}?startPeriod=1976-01"
     
     # Requesting CSV is drastically more reliable than parsing SDMX-JSON structures
     headers = {'Accept': 'text/csv'}
     response = requests.get(url, headers=headers, timeout=15)
     
     if response.status_code != 200:
-        raise ConnectionError(f"IMF API returned status code {response.status_code} for {COUNTRIES[iso3]}.")
+        raise ConnectionError(f"IMF API returned status code {response.status_code} for {COUNTRIES[iso3]} ({dataflow}).")
         
     # Parse the CSV straight into a Pandas DataFrame
     df_raw = pd.read_csv(io.StringIO(response.text))
     
     if 'TIME_PERIOD' not in df_raw.columns or 'OBS_VALUE' not in df_raw.columns:
-        raise ValueError(f"Unexpected CSV format from IMF API for {COUNTRIES[iso3]}.")
+        raise ValueError(f"Unexpected CSV format from IMF API for {COUNTRIES[iso3]} ({dataflow}).")
         
     df_raw = df_raw[['TIME_PERIOD', 'OBS_VALUE']].rename(columns={'OBS_VALUE': 'value'})
     
@@ -62,7 +64,7 @@ def fetch_imf_data(iso3, is_fx=False):
     df_raw = df_raw.dropna(subset=['date', 'value']).sort_values('date').set_index('date')
     
     if df_raw.empty:
-        raise ValueError(f"No valid time-series data found in the IMF payload for {COUNTRIES[iso3]}.")
+        raise ValueError(f"No valid time-series data found in the IMF payload for {COUNTRIES[iso3]} ({dataflow}).")
         
     return df_raw['value']
 
@@ -112,6 +114,7 @@ with st.spinner("Fetching IMF API data..."):
     df = df.join(exc2_series.rename('EXC2'))
 
     # Forward fill missing data up to a reasonable limit (e.g., 3 months for reporting lags)
+    # Note: We intentionally avoid backward filling so historical non-existent data (like the Euro before 1999) remains blank and doesn't skew RER*
     df.ffill(limit=3, inplace=True)
 
     # S(t): units of Country 2 currency per 1 unit of Country 1 currency
