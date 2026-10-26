@@ -91,8 +91,8 @@ COUNTRIES: dict[str, str] = {
     "PSE": "West Bank and Gaza", "YEM": "Yemen", "ZMB": "Zambia", "ZWE": "Zimbabwe",
 }
 
-REAL_COLOR = "#4F46E5"
-NOMINAL_COLOR = "#F59E0B"
+REAL_COLOR = "#2E86C1"
+NOMINAL_COLOR = "#E74C3C"
 
 
 # --------------------------------------------------------------------------- #
@@ -238,63 +238,44 @@ def build_frame(d: dict) -> pd.DataFrame:
 # --------------------------------------------------------------------------- #
 # UI helpers
 # --------------------------------------------------------------------------- #
-def inject_css() -> None:
-    st.markdown(
-        """
-        <style>
-        .block-container {max-width: 1100px; padding-top: 2.2rem;}
-        h1 {font-weight: 700; letter-spacing: -0.02em; margin-bottom: 0.1rem;}
-        .subtitle {color: #6B7280; margin-bottom: 1.4rem; font-size: 1.02rem;}
-        [data-testid="stMetric"] {
-            background: rgba(127,127,127,0.07); border-radius: 14px;
-            padding: 14px 18px; border: 1px solid rgba(127,127,127,0.15);
-        }
-        [data-testid="stMetricLabel"] {opacity: 0.7;}
-        .formula {color: #6B7280; font-size: 0.9rem; margin-top: -0.4rem;}
-        </style>
-        """,
-        unsafe_allow_html=True,
-    )
-
-
-def make_chart(sample: pd.DataFrame, view: str, n1: str, n2: str) -> go.Figure:
+def make_chart(sample: pd.DataFrame, view: str, c1: str, c2: str, n1: str, n2: str) -> go.Figure:
     x = sample.index.to_timestamp()
     fig = make_subplots(specs=[[{"secondary_y": view == "Both"}]])
 
     if view in ("Real", "Both"):
         fig.add_trace(
-            go.Scatter(x=x, y=sample["real_index"], name="Real index (RER* = 100)",
-                       line=dict(color=REAL_COLOR, width=2.4),
+            go.Scatter(x=x, y=sample["real_index"], name="Real Index (RER)",
+                       line=dict(color=REAL_COLOR, width=2),
                        hovertemplate="%{x|%b %Y}<br>Real index: %{y:.2f}<extra></extra>"),
             secondary_y=False,
         )
         fig.add_hline(y=100, line=dict(color=REAL_COLOR, width=1, dash="dot"), opacity=0.5)
     if view in ("Nominal", "Both"):
         fig.add_trace(
-            go.Scatter(x=x, y=sample["S"], name=f"Nominal S ({n2} per {n1})",
-                       line=dict(color=NOMINAL_COLOR, width=2.4),
+            go.Scatter(x=x, y=sample["S"], name=f"Nominal S(t) [{c2}/{c1}]",
+                       line=dict(color=NOMINAL_COLOR, width=2),
                        hovertemplate="%{x|%b %Y}<br>S: %{y:,.4f}<extra></extra>"),
             secondary_y=(view == "Both"),
         )
 
+    real_title = "Real Index (Average = 100)"
+    nom_title = f"Nominal ({c2}/{c1})"
     if view == "Real":
-        fig.update_yaxes(title_text="Real index")
+        fig.update_yaxes(title_text=real_title, color=REAL_COLOR)
     elif view == "Nominal":
-        fig.update_yaxes(title_text=f"{n2} per 1 {n1}")
+        fig.update_yaxes(title_text=nom_title, color=NOMINAL_COLOR)
     else:
-        fig.update_yaxes(title_text="Real index", secondary_y=False,
-                         title_font_color=REAL_COLOR)
-        fig.update_yaxes(title_text=f"{n2} per 1 {n1}", secondary_y=True,
-                         title_font_color=NOMINAL_COLOR, showgrid=False)
+        fig.update_yaxes(title_text=real_title, color=REAL_COLOR, secondary_y=False)
+        fig.update_yaxes(title_text=nom_title, color=NOMINAL_COLOR, secondary_y=True,
+                         showgrid=False)
 
     fig.update_layout(
-        template="plotly_white", height=470, hovermode="x unified",
-        margin=dict(l=10, r=10, t=10, b=10),
-        legend=dict(orientation="h", y=1.08, x=0),
-        paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
-        font=dict(family="Inter, system-ui, sans-serif"),
+        title=f"Exchange Rates: {n1} vs {n2}",
+        template="plotly_white", height=520, hovermode="x unified",
+        margin=dict(l=10, r=10, t=80, b=10),
+        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="right", x=1),
     )
-    fig.update_xaxes(showgrid=False, rangeslider=dict(visible=False))
+    fig.update_xaxes(showgrid=False)
     fig.update_yaxes(gridcolor="rgba(127,127,127,0.18)", zeroline=False)
     return fig
 
@@ -307,42 +288,54 @@ def fmt_range(s: pd.Series) -> str:
 # App
 # --------------------------------------------------------------------------- #
 def main() -> None:
-    st.set_page_config(page_title="Real Exchange Rate Explorer", page_icon="💱", layout="centered")
-    inject_css()
+    st.set_page_config(page_title="Real Exchange Rate Analyzer", page_icon="💱", layout="wide")
 
-    st.title("Real Exchange Rate Explorer")
-    st.markdown(
-        '<div class="subtitle">Compare nominal and CPI-based real exchange rates '
-        "for any two IMF economies, monthly since 1976.</div>",
-        unsafe_allow_html=True,
-    )
+    st.title("🌍 Real Exchange Rate (RER) Analyzer")
+    st.markdown("Analyze the Real and Nominal Exchange Rates dynamically between any two countries.")
 
     codes = list(COUNTRIES)
-    col_a, col_b = st.columns(2)
-    c1 = col_a.selectbox("Country 1 (base)", codes, index=codes.index("USA"),
-                         format_func=lambda c: COUNTRIES[c])
-    c2 = col_b.selectbox("Country 2 (quote)", codes, index=codes.index("JPN"),
-                         format_func=lambda c: COUNTRIES[c])
+    label = lambda c: f"{c} - {COUNTRIES[c]}"  # noqa: E731
+
+    # ---- Sidebar ---------------------------------------------------------- #
+    with st.sidebar:
+        st.header("⚙️ Settings")
+        c1 = st.selectbox("Country 1 (Base Currency)", codes, index=codes.index("USA"),
+                          format_func=label)
+        c2 = st.selectbox("Country 2 (Target Currency)", codes, index=codes.index("G163"),
+                          format_func=label)
+        st.divider()
+        period_slot = st.container()  # filled once data is loaded
+        st.divider()
+        view = st.radio("Select Plot Type", ["Real", "Nominal", "Both"], index=2)
+        st.divider()
+        st.markdown("### Methodology")
+        st.latex(r"S(t) = \frac{\text{Country}_2}{\text{Country}_1}")
+        st.latex(r"RER(t) = S(t) \times \frac{P_1(t)}{P_2(t)}")
+        st.latex(r"\text{Index}(t) = 100 \times \frac{RER(t)}{RER^*}")
+
     n1, n2 = COUNTRIES[c1], COUNTRIES[c2]
 
     if c1 == c2:
         st.info("Pick two different economies to compare.")
         return
 
+    # ---- Data ------------------------------------------------------------- #
     try:
-        with st.spinner("Fetching data from the IMF…"):
+        with st.spinner("Fetching IMF API data..."):
             data = load_pair(c1, c2)
     except IMFError as e:
-        st.error(f"The IMF data service did not respond as expected. {e}")
+        st.error(f"🚨 **Data Fetch Error:** {e}")
+        st.info("The requested data might not be available for this country, "
+                "or the API is under heavy load.")
         return
     except Exception as e:  # noqa: BLE001
-        st.error(f"Unexpected error while loading data: {e}")
+        st.error(f"🚨 **Unexpected error while loading data:** {e}")
         return
 
     frame = build_frame(data)
     valid = frame.dropna(subset=["S", "cpi1", "cpi2", "RER"])
 
-    with st.expander("Data coverage", expanded=valid.empty):
+    with st.expander("ℹ️ Data coverage", expanded=valid.empty):
         st.markdown(
             f"- **{n1} CPI:** {fmt_range(data['p1'])}\n"
             f"- **{n2} CPI:** {fmt_range(data['p2'])}\n"
@@ -354,23 +347,20 @@ def main() -> None:
             st.caption(note)
 
     if valid.empty:
-        st.warning("No months have complete CPI and exchange-rate data for this pair. "
-                   "Try another combination.")
+        st.warning("No overlapping economic data available for these countries.")
         return
 
-    # --- Controls ---------------------------------------------------------- #
     months = list(valid.index)
-    start, end = st.select_slider(
-        "Sample period",
-        options=months,
-        value=(months[0], months[-1]),
-        format_func=lambda p: p.strftime("%b %Y"),
-        key=f"range_{c1}_{c2}",
-    )
-    view = st.segmented_control("Chart", ["Real", "Nominal", "Both"], default="Both",
-                                key="view") or "Both"
+    with period_slot:
+        start, end = st.select_slider(
+            "Sample Period",
+            options=months,
+            value=(months[0], months[-1]),
+            format_func=lambda p: p.strftime("%b %Y"),
+            key=f"range_{c1}_{c2}",
+        )
 
-    # --- Calculations (RER* recomputed for every selected sample) ---------- #
+    # ---- Calculations (RER* recomputed for every selected sample) ---------- #
     sample = valid.loc[start:end].copy()
     rer_star = sample["RER"].mean()
     sample["rer_star"] = rer_star
@@ -379,19 +369,14 @@ def main() -> None:
     m1, m2, m3, m4 = st.columns(4)
     m1.metric("RER* (sample mean)", f"{rer_star:,.4f}")
     m2.metric(f"Latest S ({sample.index[-1].strftime('%b %Y')})", f"{sample['S'].iloc[-1]:,.4f}")
-    m3.metric("Latest real index", f"{sample['real_index'].iloc[-1]:.1f}")
-    m4.metric("Valid months", f"{len(sample):,}")
+    m3.metric("Latest Real Index", f"{sample['real_index'].iloc[-1]:.1f}")
+    m4.metric("Valid Months", f"{len(sample):,}")
 
-    st.plotly_chart(make_chart(sample, view, n1, n2), width="stretch")
+    st.plotly_chart(make_chart(sample, view, c1, c2, n1, n2), width="stretch")
+    st.caption(f"S = {n2} per 1 {n1}. An index above 100 means {n1} is relatively more "
+               f"expensive than its sample average (real appreciation of the {n1} currency).")
 
-    st.markdown(
-        f'<div class="formula">S = {n2} per 1 {n1}. RER = S × P₁ / P₂. '
-        f"An index above 100 means {n1} is relatively more expensive than its sample average "
-        f"(real appreciation of the {n1} currency).</div>",
-        unsafe_allow_html=True,
-    )
-
-    # --- CSV export -------------------------------------------------------- #
+    # ---- Data & export ---------------------------------------------------- #
     out = pd.DataFrame({
         "date": sample.index.strftime("%Y-%m"),
         f"{c1}_currency_per_USD": sample["fx1_per_usd"].values,
@@ -403,13 +388,16 @@ def main() -> None:
         "RER_star": sample["rer_star"].values,
         "Real_Index": sample["real_index"].values,
     })
-    st.download_button(
-        "⬇  Download CSV",
-        out.to_csv(index=False).encode("utf-8"),
-        file_name=f"rer_{c1}_{c2}_{start}_{end}.csv".replace("/", "-"),
-        mime="text/csv",
-        width="stretch",
-    )
+
+    with st.expander("📊 View Data & Download"):
+        st.dataframe(out.set_index("date").style.format("{:.4f}", na_rep="-"), width="stretch")
+        st.download_button(
+            "📥 Download Data as CSV",
+            out.to_csv(index=False).encode("utf-8"),
+            file_name=f"RER_{c1}_to_{c2}_{start}_to_{end}.csv",
+            mime="text/csv",
+        )
+
     st.caption("Source: IMF (CPI and period-average exchange rates). "
                "Coverage varies by country; only months with all inputs are used.")
 
